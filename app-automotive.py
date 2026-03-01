@@ -4,9 +4,10 @@ import gspread
 from gspread_dataframe import set_with_dataframe, get_as_dataframe
 from google.oauth2.service_account import Credentials
 
-# --- CONFIG ---
+# --- CONFIGURATION ---
 SHEET_ID = "17Nq4MVLOKtdantiDayXwAgPRZKCvkI1FD4n7FJMZlJo"
 
+# Mapping GID (Sheet ID ย่อย) ตามที่คุณระบุ
 GID_MAP = {
     "1.1 ยอดผลิตรถยนต์": "446114989",
     "1.2 ยอดจำหน่ายรถยนต์": "0",
@@ -16,123 +17,127 @@ GID_MAP = {
     "2.3 ยอดส่งออกจักรยานยนต์": "77561054"
 }
 
-# รายชื่อภูมิภาคตามรูปแนบที่ 1 สำหรับยอดส่งออก
+# รายชื่อภูมิภาคสำหรับยอดส่งออก (1.3) ตามรูปแนบที่ 1
 REGIONS_LIST = [
     "Asia", "Australia, NZ & Other Oceania", "Middle East", 
     "Africa", "Europe", "North America", "Central & South America", "Others"
 ]
 
-# --- FUNCTIONS ---
+# --- CORE FUNCTIONS ---
 def get_gspread_client():
+    """เชื่อมต่อ Google Sheets โดยใช้ Key จาก Secrets"""
     scopes = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
     creds_info = st.secrets["gcp_service_account"]
     creds = Credentials.from_service_account_info(creds_info, scopes=scopes)
     return gspread.authorize(creds)
 
-def update_google_sheet(gid, input_df):
+def update_google_sheet(gid, input_df, month, year, is_export=False):
+    """ฟังก์ชันหลักในการบันทึกข้อมูล พร้อมระบบ Overwrite และ Sort"""
     gc = get_gspread_client()
     sh = gc.open_by_key(SHEET_ID)
     worksheet = sh.get_as_spreadsheet().get_worksheet_by_id(int(gid))
     
-    # 1. ดึงข้อมูลเดิมจาก Google Sheet
+    # ดึงข้อมูลเดิม
     existing_df = get_as_dataframe(worksheet).dropna(how='all').dropna(axis=1, how='all')
     
-    # 2. แปลงข้อมูล Year/Month ให้เป็น String เพื่อความแม่นยำในการเปรียบเทียบ
-    input_df['Year'] = input_df['Year'].astype(str)
-    input_df['Month'] = input_df['Month'].astype(str)
-    
+    # ลบข้อมูลเก่าที่มี Month/Year ตรงกันออกก่อน (Overwrite)
     if not existing_df.empty:
-        existing_df['Year'] = existing_df['Year'].astype(str)
         existing_df['Month'] = existing_df['Month'].astype(str)
-        
-        # 3. ลบข้อมูลเก่าที่มี Year/Month (และ Region) ตรงกับที่กรอกใหม่ (Overwrite Logic)
-        for _, row in input_df.iterrows():
-            if 'Region' in input_df.columns:
-                mask = ~((existing_df['Month'] == row['Month']) & 
-                         (existing_df['Year'] == row['Year']) & 
-                         (existing_df['Region'] == row['Region']))
-            else:
-                mask = ~((existing_df['Month'] == row['Month']) & 
-                         (existing_df['Year'] == row['Year']))
-            existing_df = existing_df[mask]
+        existing_df['Year'] = existing_df['Year'].astype(str)
+        mask = ~((existing_df['Month'] == month) & (existing_df['Year'] == year))
+        existing_df = existing_df[mask]
 
-    # 4. รวมข้อมูลเก่าและใหม่
+    # รวมข้อมูล
     updated_df = pd.concat([existing_df, input_df], ignore_index=True)
     
-    # 5. จัดรูปแบบลำดับตาม Year -> Month -> Region (แบบรูปที่ 2)
+    # จัดเรียงลำดับ (Sorting)
     month_order = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
     updated_df['Month'] = pd.Categorical(updated_df['Month'], categories=month_order, ordered=True)
     
-    if 'Region' in updated_df.columns:
+    if is_export:
         updated_df['Region'] = pd.Categorical(updated_df['Region'], categories=REGIONS_LIST, ordered=True)
         updated_df = updated_df.sort_values(by=['Year', 'Region', 'Month'])
     else:
         updated_df = updated_df.sort_values(by=['Year', 'Month'])
 
-    # 6. บันทึกกลับลง Google Sheet
+    # บันทึกกลับลง Google Sheet
     set_with_dataframe(worksheet, updated_df)
     return True
 
 # --- UI INTERFACE ---
-st.set_page_config(page_title="Data Entry System", layout="wide")
-st.title("📋 ระบบจัดการข้อมูลยานยนต์ (รองรับ Excel Copy/Paste)")
+st.set_page_config(page_title="Auto Data Entry", layout="wide")
+st.title("🚀 ระบบจัดการข้อมูลยานยนต์ (Google Sheets)")
 
-category = st.selectbox("เลือกหัวข้อที่ต้องการจัดการ", list(GID_MAP.keys()))
+# ส่วนตั้งค่าด้านข้าง
+with st.sidebar:
+    st.header("📅 กำหนดข้อมูล")
+    sel_month = st.selectbox("Month", ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"])
+    sel_year = st.text_input("Year (พ.ศ.)", value="2568")
+    st.divider()
+    category = st.radio("เลือกหัวข้อที่ต้องการกรอก:", list(GID_MAP.keys()))
 
-# เตรียมข้อมูลเบื้องต้น
-month_default = st.sidebar.selectbox("Month (Default)", ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"])
-year_default = st.sidebar.text_input("Year (Default)", value="2567")
-
-st.divider()
-
+# --- หมวดหมู่ 1.3 ยอดส่งออก (Special Logic) ---
 if category == "1.3 ยอดส่งออกรถยนต์":
     st.subheader(f"📍 {category}")
-    st.info("💡 คุณสามารถก๊อปปี้ข้อมูลจาก Excel (5 คอลัมน์: Pickup, Passenger, PPV, Truck) มาวางลงในตารางด้านล่างได้เลย")
+    st.info("💡 ขั้นตอน: ก๊อปปี้คอลัมน์ตัวเลขจาก Excel (แนวตั้ง 1 คอลัมน์) ตามรูปแนบ 1 แล้ววางในช่องด้านล่าง")
     
-    # สร้าง DataFrame เริ่มต้นตาม Region สำหรับยอดส่งออก
-    init_data = {
-        "Month": [month_default] * len(REGIONS_LIST),
-        "Year": [year_default] * len(REGIONS_LIST),
-        "Region": REGIONS_LIST,
-        "Pickup": [0]*len(REGIONS_LIST),
-        "Passenger": [0]*len(REGIONS_LIST),
-        "PPV": [0]*len(REGIONS_LIST),
-        "Truck": [0]*len(REGIONS_LIST)
-    }
-    df_to_edit = pd.DataFrame(init_data)
+    raw_paste = st.text_area("วางข้อมูลจาก Excel ที่นี่", height=300, placeholder="ตัวอย่าง:\n8695\n8766\n2483\n0\n...")
     
-    # ตารางสำหรับแก้ไขและวางข้อมูล
-    edited_df = st.data_editor(df_to_edit, num_rows="dynamic", hide_index=True, use_container_width=True)
-    edited_df["Total_region"] = edited_df[["Pickup", "Passenger", "PPV", "Truck"]].sum(axis=1)
+    if raw_paste:
+        # ประมวลผลข้อความที่วางให้กลายเป็น DataFrame
+        lines = raw_paste.strip().split('\n')
+        vals = []
+        for l in lines:
+            v = l.replace(',', '').strip()
+            vals.append(float(v) if v not in ['-', '', ' '] else 0)
 
+        # Map ข้อมูลจากแนวตั้ง (รูป 1) ไปเป็นแนวนอน (รูป 2)
+        rows = []
+        v_idx = 0
+        for reg in REGIONS_LIST:
+            # ดึงข้อมูล 4 ประเภทต่อภูมิภาค (Pickup, Passenger, PPV, Truck)
+            data_chunk = vals[v_idx : v_idx+4] if v_idx+4 <= len(vals) else [0,0,0,0]
+            rows.append({
+                "Month": sel_month, "Year": sel_year, "Region": reg,
+                "Pickup": data_chunk[0], "Passenger": data_chunk[1],
+                "PPV": data_chunk[2], "Truck": data_chunk[3],
+                "Total_region": sum(data_chunk)
+            })
+            v_idx += 5 # ขยับข้ามไป 5 บรรทัด (เพราะใน Excel มีบรรทัด Sub Total คั่น)
+            
+        final_df = pd.DataFrame(rows)
+        st.write("### 🔍 ตรวจสอบข้อมูลก่อนบันทึก (จัดรูปแบบตามรูปแนบ 2)")
+        st.dataframe(final_df, use_container_width=True)
+        
+        if st.button("🚀 บันทึกข้อมูลส่งออก"):
+            if update_google_sheet(GID_MAP[category], final_df, sel_month, sel_year, is_export=True):
+                st.success("บันทึกและจัดเรียงข้อมูลส่งออกเรียบร้อย!")
+
+# --- หมวดหมู่อื่นๆ (Manual Entry Table) ---
 else:
-    # หมวดหมู่อื่นๆ ยังคงใช้รูปแบบเดิม แต่ปรับเป็นตารางเพื่อให้วางข้อมูลได้เช่นกัน
     st.subheader(f"📊 {category}")
     
-    col_maps = {
-        "1.1 ยอดผลิตรถยนต์": ["Month", "Year", "Passenger", "Pickup", "Commercial"],
-        "1.2 ยอดจำหน่ายรถยนต์": ["Month", "Year", "Passenger", "Pickup", "Commercial", "PPV_SUV"],
-        "2.1 ยอดผลิตจักรยานยนต์": ["Month", "Year", "Family", "Sport", "EV", "ICONIC"],
-        "2.2 ยอดจำหน่ายจักรยานยนต์": ["Month", "Year", "< 50 CC", "51-110 CC", "111-125 CC", "126-250 CC", "251-399 CC", "< 400 CC"],
-        "2.3 ยอดส่งออกจักรยานยนต์": ["Month", "Year", "CBU", "CKD", "Value"]
+    # กำหนดคอลัมน์ตามประเภท
+    col_config = {
+        "1.1 ยอดผลิตรถยนต์": ["Passenger", "Pickup", "Commercial"],
+        "1.2 ยอดจำหน่ายรถยนต์": ["Passenger", "Pickup", "Commercial", "PPV_SUV"],
+        "2.1 ยอดผลิตจักรยานยนต์": ["Family", "Sport", "EV", "ICONIC"],
+        "2.2 ยอดจำหน่ายจักรยานยนต์": ["< 50 CC", "51-110 CC", "111-125 CC", "126-250 CC", "251-399 CC", "< 400 CC"],
+        "2.3 ยอดส่งออกจักรยานยนต์": ["CBU", "CKD", "Value"]
     }
     
-    current_cols = col_maps[category]
-    df_template = pd.DataFrame([{"Month": month_default, "Year": year_default, **{c: 0 for c in current_cols if c not in ["Month", "Year"]}}])
+    # สร้างตารางให้กรอกหรือวางข้อมูล
+    current_cols = col_config[category]
+    init_df = pd.DataFrame([{"Month": sel_month, "Year": sel_year, **{c: 0 for c in current_cols}}])
     
-    edited_df = st.data_editor(df_template, num_rows="dynamic", hide_index=True, use_container_width=True)
+    edited_df = st.data_editor(init_df, num_rows="dynamic", hide_index=True)
     
-    # คำนวณ Total อัตโนมัติ
+    # คำนวณ Total
     numeric_cols = [c for c in edited_df.columns if c not in ["Month", "Year"]]
     edited_df["Total"] = edited_df[numeric_cols].sum(axis=1)
 
-# ปุ่มบันทึก
-if st.button("🚀 บันทึกข้อมูลและจัดรูปแบบลง Google Sheet", use_container_width=True):
-    with st.spinner("กำลังประมวลผลและจัดเรียงข้อมูล..."):
-        try:
-            update_google_sheet(GID_MAP[category], edited_df)
-            st.success(f"บันทึกและจัดรูปแบบข้อมูล {category} เรียบร้อยแล้ว!")
-            st.balloons()
-        except Exception as e:
-            st.error(f"เกิดข้อผิดพลาด: {e}")
+    if st.button(f"💾 บันทึก {category}"):
+        if update_google_sheet(GID_MAP[category], edited_df, sel_month, sel_year):
+            st.success("บันทึกข้อมูลเรียบร้อย!")
+
 
