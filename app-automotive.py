@@ -30,12 +30,16 @@ def get_gspread_client():
     creds_info = st.secrets["gcp_service_account"]
     creds = Credentials.from_service_account_info(creds_info, scopes=scopes)
     return gspread.authorize(creds)
-
+# บรรทัดที่ 34 โดยประมาณ
 def update_google_sheet(gid, input_df, month, year, is_export=False):
-    """ฟังก์ชันหลักในการบันทึกข้อมูล พร้อมระบบ Overwrite และ Sort"""
     gc = get_gspread_client()
-    sh = gc.open_by_key(SHEET_ID)
-    worksheet = sh.get_as_spreadsheet().get_worksheet_by_id(int(gid))
+    sh = gc.open_by_key(SHEET_ID) # บรรทัดที่ 36
+    # บรรทัดที่ 38: แก้ไขเป็นแบบนี้
+    worksheet = sh.get_worksheet_by_id(int(gid)) 
+    
+    # 1. ดึงข้อมูลเดิมจาก Google Sheet
+    existing_df = get_as_dataframe(worksheet).dropna(how='all').dropna(axis=1, how='all')
+    # ... บรรทัดต่อๆ ไปเหมือนเดิม ...
     
     # ดึงข้อมูลเดิม
     existing_df = get_as_dataframe(worksheet).dropna(how='all').dropna(axis=1, how='all')
@@ -139,5 +143,6 @@ else:
     if st.button(f"💾 บันทึก {category}"):
         if update_google_sheet(GID_MAP[category], edited_df, sel_month, sel_year):
             st.success("บันทึกข้อมูลเรียบร้อย!")
+
 
 
