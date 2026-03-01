@@ -27,7 +27,7 @@ MONTH_ORDER = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "O
 def get_gspread_client():
     scopes = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
     if "gcp_service_account" not in st.secrets:
-        st.error("❌ ไม่พบข้อมูล Secrets กรุณาตั้งค่าให้ถูกต้อง")
+        st.error("❌ ไม่พบข้อมูล Secrets: กรุณาเพิ่ม [gcp_service_account] ใน Streamlit Cloud")
         st.stop()
     creds_info = st.secrets["gcp_service_account"]
     creds = Credentials.from_service_account_info(creds_info, scopes=scopes)
@@ -38,68 +38,69 @@ def update_google_sheet(gid, input_df, month, year, is_export=False):
     sh = gc.open_by_key(SHEET_ID)
     worksheet = sh.get_worksheet_by_id(int(gid))
     
-    # 1. ดึงข้อมูลเดิมทั้งหมด
+    # 1. ดึงข้อมูลเดิม และล้างค่าว่างทิ้งทันที
     existing_df = get_as_dataframe(worksheet).dropna(how='all').dropna(axis=1, how='all')
     
-    # 2. เตรียมข้อมูลใหม่ให้เป็น String เพื่อป้องกันการเทียบ Type ผิดพลาด
-    input_df['Month'] = input_df['Month'].astype(str)
-    input_df['Year'] = input_df['Year'].astype(str)
+    # 2. ทำความสะอาดข้อมูล Input
+    input_df['Month'] = input_df['Month'].astype(str).str.strip()
+    input_df['Year'] = input_df['Year'].astype(str).str.strip()
     
     if not existing_df.empty:
-        existing_df['Month'] = existing_df['Month'].astype(str)
-        existing_df['Year'] = existing_df['Year'].astype(str)
+        # ล้างช่องว่างในข้อมูลเก่าด้วย (ป้องกัน ValueError ตอนจัดเรียง)
+        existing_df['Month'] = existing_df['Month'].astype(str).str.strip()
+        existing_df['Year'] = existing_df['Year'].astype(str).str.strip()
         
-        # 3. OVERWRITE LOGIC: ลบข้อมูลเก่าที่ "เดือน" และ "ปี" ตรงกับที่เราจะบันทึกออกให้หมด
+        # 3. STRICT OVERWRITE: กรองข้อมูลเก่าทิ้งหากเดือนและปีตรงกัน
         if is_export:
-            # สำหรับหมวด 1.3/2.3 เช็ค Region ด้วย
+            # สำหรับหมวด 1.3 เช็ค Region ด้วย
             mask = ~((existing_df['Month'] == str(month)) & 
                      (existing_df['Year'] == str(year)) & 
                      (existing_df['Region'].isin(input_df['Region'])))
         else:
-            # สำหรับหมวดปกติ ลบทุกแถวที่มี Month/Year ตรงกัน
             mask = ~((existing_df['Month'] == str(month)) & 
                      (existing_df['Year'] == str(year)))
         
         existing_df = existing_df[mask]
 
-    # 4. รวมข้อมูลใหม่เข้ากับข้อมูลเก่าที่เหลือ
+    # 4. รวมข้อมูล
     updated_df = pd.concat([existing_df, input_df], ignore_index=True)
     
-    # 5. STRICT SORTING: บังคับลำดับให้ถูกต้อง
-    # แปลง Year เป็นตัวเลขชั่วคราวเพื่อให้เรียง 2567 ก่อน 2568
-    updated_df['Year_int'] = updated_df['Year'].astype(int)
-    # กำหนดลำดับเดือน Jan-Dec
+    # 5. การจัดเรียง (Sorting) - แก้ไขจุดที่ทำให้เกิด ValueError
+    # แปลงปีเป็นตัวเลขแบบปลอดภัย (ถ้าแปลงไม่ได้ให้เป็น 0)
+    updated_df['Year_tmp'] = pd.to_numeric(updated_df['Year'], errors='coerce').fillna(0).astype(int)
+    
+    # ตั้งค่าลำดับเดือน
     updated_df['Month'] = pd.Categorical(updated_df['Month'], categories=MONTH_ORDER, ordered=True)
     
     if is_export:
         updated_df['Region'] = pd.Categorical(updated_df['Region'], categories=REGIONS_LIST, ordered=True)
-        updated_df = updated_df.sort_values(by=['Year_int', 'Month', 'Region'])
+        updated_df = updated_df.sort_values(by=['Year_tmp', 'Month', 'Region'])
     else:
-        updated_df = updated_df.sort_values(by=['Year_int', 'Month'])
+        updated_df = updated_df.sort_values(by=['Year_tmp', 'Month'])
 
-    # ลบ Column ช่วยเรียงลำดับทิ้งก่อนบันทึก
-    updated_df = updated_df.drop(columns=['Year_int'])
+    # ลบคอลัมน์ชั่วคราวทิ้ง
+    updated_df = updated_df.drop(columns=['Year_tmp'])
 
-    # 6. บันทึกกลับลง Sheet (Clear & Write)
+    # 6. บันทึกกลับแบบล้างแผ่นงานก่อน (ป้องกันข้อมูลค้าง)
     worksheet.clear()
     set_with_dataframe(worksheet, updated_df)
     return True
 
 # --- UI ---
-st.set_page_config(page_title="Automotive Data Entry Pro", layout="wide")
-st.title("🚀 ระบบบันทึกข้อมูลยานยนต์ (V3: Strict Overwrite)")
+st.set_page_config(page_title="Data Management", layout="wide")
+st.title("📑 ระบบจัดการข้อมูล (แก้ไขปัญหาการเรียงลำดับและการซ้ำ)")
 
 with st.sidebar:
-    st.header("📅 เลือกช่วงเวลา")
+    st.header("📅 ช่วงเวลา")
     sel_month = st.selectbox("เดือน", MONTH_ORDER)
     sel_year = st.text_input("ปี (พ.ศ.)", value="2568")
     st.divider()
-    category = st.radio("หัวข้อ:", list(GID_MAP.keys()))
+    category = st.radio("เลือกหัวข้อ:", list(GID_MAP.keys()))
 
-# --- หมวด 1.3 (Paste แนวตั้ง) ---
+# --- หมวด 1.3 ---
 if category == "1.3 ยอดส่งออกรถยนต์":
     st.subheader(f"📍 {category}")
-    raw_paste = st.text_area("วางข้อมูลคอลัมน์จาก Excel", height=200)
+    raw_paste = st.text_area("วางข้อมูลแนวตั้งจาก Excel", height=200)
     if raw_paste:
         lines = raw_paste.strip().split('\n')
         vals = [float(l.replace(',', '').strip()) if l.strip() not in ['-', '', ' '] else 0 for l in lines]
@@ -114,11 +115,11 @@ if category == "1.3 ยอดส่งออกรถยนต์":
             })
             idx += 5
         final_df = pd.DataFrame(rows)
-        st.write("🔍 ตรวจสอบ (จะบันทึกทับข้อมูลเดิมทันที)")
+        st.write("🔍 ข้อมูลที่จะบันทึก (จะทับค่าเดิมในระบบ)")
         edited_final = st.data_editor(final_df, use_container_width=True)
-        if st.button("🚀 บันทึกข้อมูลและจัดเรียงใหม่"):
+        if st.button("🚀 ยืนยันการบันทึกทับ"):
             if update_google_sheet(GID_MAP[category], edited_final, sel_month, sel_year, is_export=True):
-                st.success("บันทึกและจัดเรียงข้อมูลเรียบร้อย!")
+                st.success(f"บันทึกข้อมูลเดือน {sel_month} เรียบร้อยและจัดลำดับใหม่แล้ว")
 
 # --- หมวดอื่นๆ ---
 else:
@@ -133,9 +134,9 @@ else:
     cols = col_config[category]
     template_df = pd.DataFrame([{"Month": sel_month, "Year": sel_year, **{c: 0 for c in cols}}])
     edited_df = st.data_editor(template_df, hide_index=True, use_container_width=True)
-    if st.button(f"💾 บันทึกทับ {category}"):
+    if st.button(f"💾 บันทึกทับข้อมูล {sel_month}"):
         if update_google_sheet(GID_MAP[category], edited_df, sel_month, sel_year):
-            st.success("บันทึกสำเร็จ!")
+            st.success(f"บันทึก {sel_month} สำเร็จ!")
 
 
 
